@@ -1,0 +1,79 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Build / Distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs
+*.log
+
+# Environment Variables
+.env
+.env.*
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Generated Data
+outputs/
+data/raw/
+data/processed/
+data/interim/
+
+# Model Checkpoints
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.h5
+*.pkl
+*.joblib
+
+# NeRF / Deep Learning Outputs
+runs/
+checkpoints/
+wandb/
+tensorboard/
+events.out.tfevents.*
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+
+# API Secrets
+config/secrets.yaml
+config/*.key
+config/*.pem
+
+# Testing
+.cache/
+
+# Misc
+*.swp
+*.swo
+
+data/*
+!data/.gitkeep

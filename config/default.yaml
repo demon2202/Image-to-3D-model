@@ -1,0 +1,56 @@
+# config/default.yaml
+project:
+  name: "3d_reconstruction"
+  output_dir: "outputs"
+
+data:
+  image_dir: "data/raw"
+  image_extensions: [".jpg", ".jpeg", ".png"]
+  max_image_dimension: 1024  # Resize if larger
+  
+features:
+  detector: "sift"           # "sift" or "orb"
+  max_keypoints: 8000
+  matcher: "flann"           # "flann" or "bf"
+  ratio_threshold: 0.75      # Lowe's ratio test
+  ransac_threshold: 1.0      # pixels
+  min_matches: 30
+
+sfm:
+  min_triangulation_angle: 2.0  # degrees
+  reprojection_threshold: 4.0   # pixels
+  bundle_adjustment: true
+  ba_iterations: 50
+
+dense:
+  method: "sgbm"             # "sgbm" or "patch_match"
+  num_disparities: 128
+  block_size: 5
+  depth_filter_threshold: 0.01
+
+nerf:
+  # Architecture
+  pos_enc_dims: 10           # L for positional encoding of xyz
+  dir_enc_dims: 4            # L for positional encoding of direction
+  hidden_dim: 256
+  num_layers: 8
+  skip_connection: 4         # Skip connection at layer 4
+  
+  # Training
+  batch_size: 4096           # Number of rays per batch
+  learning_rate: 5.0e-4
+  num_iterations: 200000
+  lr_decay_steps: 250
+  lr_decay_rate: 0.1
+  
+  # Rendering
+  num_coarse_samples: 64
+  num_fine_samples: 128
+  near: 2.0
+  far: 6.0
+  chunk_size: 32768          # Rays to process at once
+  
+  # Logging
+  log_every: 100
+  val_every: 5000
+  save_every: 10000

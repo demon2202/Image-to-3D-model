@@ -94,6 +94,9 @@ def propagate_normal_orientation(
         normals_consistent: (N, 3) consistently oriented normals
     """
     n = len(points)
+    if n < 2:
+        return normals
+
     tree = KDTree(points)
     _, indices = tree.query(points, k=min(k_neighbors + 1, n))
 
@@ -108,40 +111,35 @@ def propagate_normal_orientation(
             adj[i, j] = cost
             adj[j, i] = cost
 
-    # Prim's algorithm for MST
-    adj_csr = adj.tocsr()
-    in_tree  = np.zeros(n, dtype=bool)
-    in_tree[0] = True
-    order    = [0]
+    # Compute Minimum Spanning Tree (forest) using SciPy
+    from scipy.sparse.csgraph import minimum_spanning_tree
+    mst = minimum_spanning_tree(adj.tocsr())
 
-    # Simple greedy BFS-like propagation (fast approximation)
-    visited = {0}
-    queue   = list(range(1, min(k_neighbors + 1, n)))
+    # Make MST undirected for traversal
+    mst_undirected = mst + mst.T
+    indptr = mst_undirected.indptr
+    indices_mst = mst_undirected.indices
 
+    # Traverse the MST using BFS to consistently orient normals
+    from collections import deque
+    visited = np.zeros(n, dtype=bool)
     normals_out = normals.copy()
 
-    def _propagate_bfs():
-        from collections import deque
-        q = deque([0])
-        visited_set = {0}
-
-        while q:
-            i = q.popleft()
-            _, nbrs = tree.query(points[i], k=min(k_neighbors + 1, n))
-            nbrs = nbrs[1:]   # exclude self
-
-            for j in nbrs:
-                if j in visited_set:
-                    continue
-                visited_set.add(j)
-
-                # Flip j's normal if inconsistent with i's normal
-                if np.dot(normals_out[i], normals_out[j]) < 0:
-                    normals_out[j] = -normals_out[j]
-
-                q.append(j)
-
-    _propagate_bfs()
+    for root in range(n):
+        if not visited[root]:
+            q = deque([root])
+            visited[root] = True
+            while q:
+                i = q.popleft()
+                start = indptr[i]
+                end = indptr[i+1]
+                nbrs = indices_mst[start:end]
+                for j in nbrs:
+                    if not visited[j]:
+                        visited[j] = True
+                        if np.dot(normals_out[i], normals_out[j]) < 0:
+                            normals_out[j] = -normals_out[j]
+                        q.append(j)
 
     # Normalize
     norms = np.linalg.norm(normals_out, axis=1, keepdims=True)
@@ -436,8 +434,8 @@ def decimate_mesh(
     print(f"  Decimating {len(mesh.faces):,} -> {target_faces:,} faces...")
 
     try:
-        # trimesh uses simplify_quadratic_decimation
-        decimated = mesh.simplify_quadratic_decimation(target_faces)
+        # trimesh uses simplify_quadric_decimation
+        decimated = mesh.simplify_quadric_decimation(target_faces)
         print(f"  Decimation result: {len(decimated.faces):,} faces")
         return decimated
     except Exception as e:

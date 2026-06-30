@@ -153,15 +153,21 @@ class IncrementalSfM:
         if (idx2, idx1) in self.pair_matches:
             pts1, pts2 = match_result.pts2, match_result.pts1
             inlier_mask = match_result.inlier_mask
+            swapped = True
         else:
             pts1, pts2 = match_result.pts1, match_result.pts2
             inlier_mask = match_result.inlier_mask
+            swapped = False
+        
+        # Track indices of original matches
+        match_indices = np.arange(len(match_result.matches))
         
         # Use only inliers
         if inlier_mask is not None:
             mask_bool = inlier_mask.ravel().astype(bool)
             pts1 = pts1[mask_bool]
             pts2 = pts2[mask_bool]
+            match_indices = match_indices[mask_bool]
         
         # Essential matrix
         E, e_mask = estimate_essential_matrix(pts1, pts2, self.K)
@@ -172,6 +178,7 @@ class IncrementalSfM:
             mask_bool = e_mask.ravel().astype(bool)
             pts1 = pts1[mask_bool]
             pts2 = pts2[mask_bool]
+            match_indices = match_indices[mask_bool]
         
         # Recover pose
         R, t, pose_mask = decompose_essential_matrix(E, pts1, pts2, self.K)
@@ -202,6 +209,7 @@ class IncrementalSfM:
         # Store points and observations
         pts1_valid = pts1[valid_mask]
         pts2_valid = pts2[valid_mask]
+        final_match_indices = match_indices[valid_mask]
         
         for k in range(len(filtered_points)):
             pt_idx = len(self.points_3d)
@@ -218,6 +226,14 @@ class IncrementalSfM:
             
             self.observations.append((idx1, pt_idx, pts1_valid[k]))
             self.observations.append((idx2, pt_idx, pts2_valid[k]))
+            
+            # Populate feature_to_3d mapping
+            m_idx = final_match_indices[k]
+            m = match_result.matches[m_idx]
+            feat1_idx = m.trainIdx if swapped else m.queryIdx
+            feat2_idx = m.queryIdx if swapped else m.trainIdx
+            self.feature_to_3d[(idx1, feat1_idx)] = pt_idx
+            self.feature_to_3d[(idx2, feat2_idx)] = pt_idx
         
         print(f"Initialized with {len(filtered_points)} 3D points")
     
@@ -236,37 +252,29 @@ class IncrementalSfM:
             if match_result is None:
                 continue
             
-            if pair[0] == img_idx:
-                m_pts_new = match_result.pts1
-                m_pts_old = match_result.pts2
-                if match_result.inlier_mask is not None:
-                    mask = match_result.inlier_mask.ravel().astype(bool)
-                    m_pts_new = m_pts_new[mask]
-                    m_pts_old = m_pts_old[mask]
-                matched_registered_idx = pair[1]
-            else:
-                m_pts_new = match_result.pts2
-                m_pts_old = match_result.pts1
-                if match_result.inlier_mask is not None:
-                    mask = match_result.inlier_mask.ravel().astype(bool)
-                    m_pts_new = m_pts_new[mask]
-                    m_pts_old = m_pts_old[mask]
-                matched_registered_idx = pair[0]
+            swapped = (pair[0] == img_idx)
             
-            # Check which matched old points have corresponding 3D points
-            for obs in self.observations:
-                obs_cam, obs_pt_idx, obs_2d = obs
-                if obs_cam != matched_registered_idx:
+            matches = match_result.matches
+            mask_bool = np.ones(len(matches), dtype=bool)
+            if match_result.inlier_mask is not None:
+                mask_bool = match_result.inlier_mask.ravel().astype(bool)
+            
+            pts_new_all = match_result.pts1 if swapped else match_result.pts2
+            
+            for k, (m, inlier) in enumerate(zip(matches, mask_bool)):
+                if not inlier:
                     continue
                 
-                # Find if this 2D observation matches any of m_pts_old
-                dists = np.linalg.norm(m_pts_old - obs_2d, axis=1)
-                close = np.where(dists < 3.0)[0]
+                feat_new_idx = m.queryIdx if swapped else m.trainIdx
+                feat_old_idx = m.trainIdx if swapped else m.queryIdx
                 
-                if len(close) > 0:
-                    best = close[np.argmin(dists[close])]
-                    pts_3d.append(self.points_3d[obs_pt_idx])
-                    pts_2d.append(m_pts_new[best])
+                pt_3d_idx = self.feature_to_3d.get((registered_idx, feat_old_idx))
+                if pt_3d_idx is not None:
+                    pts_3d.append(self.points_3d[pt_3d_idx])
+                    pts_2d.append(pts_new_all[k])
+                    
+                    # Also link the new feature to the 3D point (so subsequent cameras can use it)
+                    self.feature_to_3d[(img_idx, feat_new_idx)] = pt_3d_idx
         
         if len(pts_3d) < 6:
             return False
@@ -307,17 +315,25 @@ class IncrementalSfM:
             if match_result is None:
                 continue
             
-            if pair[0] == img_idx:
+            swapped = (pair[0] == img_idx)
+            
+            matches = match_result.matches
+            mask_bool = np.ones(len(matches), dtype=bool)
+            if match_result.inlier_mask is not None:
+                mask_bool = match_result.inlier_mask.ravel().astype(bool)
+            
+            if swapped:
                 pts_new = match_result.pts1
                 pts_old = match_result.pts2
             else:
                 pts_new = match_result.pts2
                 pts_old = match_result.pts1
             
-            if match_result.inlier_mask is not None:
-                mask = match_result.inlier_mask.ravel().astype(bool)
-                pts_new = pts_new[mask]
-                pts_old = pts_old[mask]
+            # Save the indices of the inliers
+            inlier_indices = np.where(mask_bool)[0]
+            
+            pts_new_in = pts_new[mask_bool]
+            pts_old_in = pts_old[mask_bool]
             
             R_old, t_old = self.registered_cameras[registered_idx]
             R_new, t_new = self.registered_cameras[img_idx]
@@ -325,13 +341,14 @@ class IncrementalSfM:
             P_old = self.K @ np.hstack([R_old, t_old])
             P_new = self.K @ np.hstack([R_new, t_new])
             
-            tri_pts = triangulate_points(P_old, P_new, pts_old, pts_new)
+            tri_pts = triangulate_points(P_old, P_new, pts_old_in, pts_new_in)
             filtered, valid = filter_triangulated_points(
-                tri_pts, P_old, P_new, pts_old, pts_new
+                tri_pts, P_old, P_new, pts_old_in, pts_new_in
             )
             
-            pts_old_valid = pts_old[valid]
-            pts_new_valid = pts_new[valid]
+            pts_old_valid = pts_old_in[valid]
+            pts_new_valid = pts_new_in[valid]
+            success_indices = inlier_indices[valid]
             
             for k in range(len(filtered)):
                 pt_idx = len(self.points_3d)
@@ -347,6 +364,14 @@ class IncrementalSfM:
                 
                 self.observations.append((registered_idx, pt_idx, pts_old_valid[k]))
                 self.observations.append((img_idx, pt_idx, pts_new_valid[k]))
+                
+                # Populate feature_to_3d mapping
+                m = matches[success_indices[k]]
+                feat_new_idx = m.queryIdx if swapped else m.trainIdx
+                feat_old_idx = m.trainIdx if swapped else m.queryIdx
+                self.feature_to_3d[(registered_idx, feat_old_idx)] = pt_idx
+                self.feature_to_3d[(img_idx, feat_new_idx)] = pt_idx
+                
                 new_points += 1
         
         print(f"  Triangulated {new_points} new points. Total: {len(self.points_3d)}")
@@ -356,9 +381,11 @@ class IncrementalSfM:
         """
         Run the full incremental SfM pipeline.
         """
-        # Step 1: Detect and match features
-        self.detect_features()
-        self.match_features()
+        # Step 1: Detect and match features (if not already done)
+        if not self.features:
+            self.detect_features()
+        if not self.pair_matches:
+            self.match_features()
         
         # Step 2: Initialize
         idx1, idx2 = self._select_initial_pair()

@@ -504,3 +504,105 @@ class TestBundleAdjustment:
         assert opt_pts is not None
         assert len(opt_poses) == 2
         assert len(opt_pts) == n_pts
+
+
+# ─────────────────────────────────────────────────────────────
+# Incremental SfM Integration Tests
+# ─────────────────────────────────────────────────────────────
+
+class TestIncrementalSfM:
+
+    def test_align_poses_umeyama(self):
+        from src.phase2_sfm.pose import align_poses_umeyama
+        
+        # Create some random ground truth poses
+        R1 = np.eye(3)
+        t1 = np.zeros((3, 1))
+        
+        R2 = rotation_matrix_y(15.0)
+        t2 = np.array([[1.0], [0.0], [0.5]])
+        
+        R3 = rotation_matrix_z(10.0) @ R2
+        t3 = np.array([[2.0], [0.5], [1.0]])
+        
+        poses_gt = [(R1, t1), (R2, t2), (R3, t3)]
+        
+        # Transform the estimated poses by a known similarity transform (R_sim, scale, t_sim)
+        # C_gt = scale * R_sim @ C_est + t_sim
+        R_sim = rotation_matrix_x(30.0)
+        scale = 2.5
+        t_sim = np.array([[5.0], [-2.0], [1.0]])
+        
+        poses_est = []
+        for R, t in poses_gt:
+            C_gt = -R.T @ t.ravel()
+            C_est = R_sim.T @ (C_gt - t_sim.ravel()) / scale
+            R_est = R @ R_sim
+            t_est = -R_est @ C_est.reshape(3, 1)
+            poses_est.append((R_est, t_est))
+            
+        R_align, scale_align, t_align = align_poses_umeyama(poses_est, poses_gt)
+        
+        assert abs(scale_align - scale) < 1e-4
+        assert np.allclose(R_align, R_sim, atol=1e-4)
+        assert np.allclose(t_align, t_sim.ravel(), atol=1e-4)
+
+    def test_incremental_sfm_pipeline(self, tmp_path, camera_setup):
+        from src.phase2_sfm.incremental_sfm import IncrementalSfM
+        
+        # Create a directory with synthetic images
+        img_dir = tmp_path / "images"
+        img_dir.mkdir()
+        
+        # We need at least 3 images to run incremental SfM.
+        K, R1, t1, R2, t2 = camera_setup
+        
+        # Create a checkerboard textured pattern
+        img1 = np.zeros((240, 320, 3), dtype=np.uint8)
+        block = 20
+        for y in range(0, 240, block * 2):
+            for x in range(0, 320, block * 2):
+                img1[y:y + block, x:x + block] = 200
+                img1[y + block:y + 2 * block, x + block:x + 2 * block] = 200
+                
+        # Add some random circles to ensure we get features
+        np.random.seed(42)
+        for _ in range(30):
+            cx = np.random.randint(20, 300)
+            cy = np.random.randint(20, 220)
+            cv2.circle(img1, (cx, cy), 10, (255, 0, 0), -1)
+            
+        # Image 2 and 3 can be warps of image 1 to simulate camera motion
+        M2 = np.float32([[0.99, -0.05, 10], [0.05, 0.99, 5]])
+        img2 = cv2.warpAffine(img1, M2, (320, 240), borderMode=cv2.BORDER_REPLICATE)
+        
+        M3 = np.float32([[0.98, -0.08, 18], [0.08, 0.98, 10]])
+        img3 = cv2.warpAffine(img1, M3, (320, 240), borderMode=cv2.BORDER_REPLICATE)
+        
+        cv2.imwrite(str(img_dir / "img1.png"), img1)
+        cv2.imwrite(str(img_dir / "img2.png"), img2)
+        cv2.imwrite(str(img_dir / "img3.png"), img3)
+        
+        # Initialize IncrementalSfM
+        sfm = IncrementalSfM(K, config={
+            'detector': 'sift',
+            'max_keypoints': 500,
+            'min_matches': 10,
+            'ransac_threshold': 3.0
+        })
+        
+        # Load images
+        sfm.load_images(str(img_dir), max_dim=320)
+        assert len(sfm.images) == 3
+        
+        # Run reconstruction
+        sfm.reconstruct(bundle_adjust_interval=2)
+        
+        # Check that we registered at least the initial pair
+        assert len(sfm.registered_cameras) >= 2
+        assert len(sfm.points_3d) > 0
+        
+        # Check point cloud export works
+        ply_file = tmp_path / "cloud.ply"
+        sfm.save_point_cloud(str(ply_file))
+        assert ply_file.exists()

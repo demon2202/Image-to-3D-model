@@ -59,6 +59,26 @@ def _set_status(job_id: str, **kwargs):
         json.dump(_job_registry[job_id], f, indent=2)
 
 
+def _discover_jobs_from_disk():
+    """Scan outputs directory and populate in-memory registry for static jobs."""
+    if not os.path.exists(OUTPUT_DIR):
+        return
+    with _registry_lock:
+        try:
+            for job_dir_name in os.listdir(OUTPUT_DIR):
+                status_path = os.path.join(OUTPUT_DIR, job_dir_name, "status.json")
+                if os.path.exists(status_path):
+                    # Only load if not already in memory
+                    if job_dir_name not in _job_registry:
+                        try:
+                            with open(status_path) as f:
+                                _job_registry[job_dir_name] = json.load(f)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+
 def _get_status(job_id: str) -> Optional[dict]:
     # Try memory first
     with _registry_lock:
@@ -67,8 +87,14 @@ def _get_status(job_id: str) -> Optional[dict]:
     # Fallback: read from disk
     status_path = os.path.join(_out_dir(job_id), "status.json")
     if os.path.exists(status_path):
-        with open(status_path) as f:
-            return json.load(f)
+        try:
+            with open(status_path) as f:
+                data = json.load(f)
+                with _registry_lock:
+                    _job_registry[job_id] = data
+                return data
+        except Exception:
+            pass
     return None
 
 
@@ -258,6 +284,7 @@ def health_check():
 @router.get("/jobs", tags=["jobs"])
 def list_jobs():
     """List all jobs and their statuses."""
+    _discover_jobs_from_disk()
     with _registry_lock:
         return {"jobs": list(_job_registry.values())}
 
@@ -275,7 +302,8 @@ def list_jobs():
                     "properties": {
                         "files": {
                             "type": "array",
-                            "items": {"type": "string", "format": "binary"}
+                            "items": {"type": "string", "format": "binary"},
+                            "description": "Upload multiple image files or a single ZIP archive containing images."
                         }
                     },
                     "required": ["files"]
@@ -288,10 +316,13 @@ async def upload_images(files: List[UploadFile] = File(...)):
     """
     Upload multiple images for 3D reconstruction.
 
-    - Accepts JPG, JPEG, PNG
+    - Accepts JPG, JPEG, PNG, or a ZIP archive containing images
     - Returns job_id to use in subsequent calls
     - Min recommended: 15 images; Max: 200 images
     """
+    import zipfile
+    import io
+
     valid_extensions = {".jpg", ".jpeg", ".png"}
     job_id  = _new_job_id()
     job_d   = _job_dir(job_id)
@@ -302,22 +333,46 @@ async def upload_images(files: List[UploadFile] = File(...)):
 
     for file in files:
         ext = os.path.splitext(file.filename)[1].lower()
-        if ext not in valid_extensions:
+        if ext == ".zip":
+            # Extract images from zip file
+            try:
+                content = await file.read()
+                with zipfile.ZipFile(io.BytesIO(content)) as z:
+                    for zinfo in z.infolist():
+                        if zinfo.is_dir():
+                            continue
+                        # Skip hidden files/OS metadata like __MACOSX or .DS_Store
+                        if os.path.basename(zinfo.filename).startswith('.') or "__MACOSX" in zinfo.filename:
+                            continue
+                        
+                        z_ext = os.path.splitext(zinfo.filename)[1].lower()
+                        if z_ext in valid_extensions:
+                            safe_name = os.path.basename(zinfo.filename)
+                            if not safe_name:
+                                continue
+                            dest_path = os.path.join(job_d, safe_name)
+                            with z.open(zinfo) as zf, open(dest_path, "wb") as df:
+                                shutil.copyfileobj(zf, df)
+                            saved_files.append(safe_name)
+                        else:
+                            skipped_files.append(zinfo.filename)
+            except Exception as e:
+                skipped_files.append(f"{file.filename} (Unzip error: {str(e)})")
+        elif ext in valid_extensions:
+            safe_name = os.path.basename(file.filename)
+            dest_path = os.path.join(job_d, safe_name)
+
+            content = await file.read()
+            with open(dest_path, "wb") as f:
+                f.write(content)
+
+            saved_files.append(safe_name)
+        else:
             skipped_files.append(file.filename)
-            continue
-
-        safe_name = os.path.basename(file.filename)
-        dest_path = os.path.join(job_d, safe_name)
-
-        content = await file.read()
-        with open(dest_path, "wb") as f:
-            f.write(content)
-
-        saved_files.append(safe_name)
 
     if not saved_files:
         shutil.rmtree(job_d, ignore_errors=True)
-        raise HTTPException(400, "No valid images uploaded. Use JPG or PNG.")
+        raise HTTPException(400, "No valid images found. Please upload JPG/PNG images or a ZIP archive containing them.")
 
     _set_status(
         job_id,
